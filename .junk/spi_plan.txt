@@ -1,0 +1,87 @@
+# Rencana: Pipeline SPI Multi-Sumber untuk Kekeringan Jawa (paper-style figures)
+
+## Context
+
+User ingin analisis kekeringan meteorologis pakai SPI (Standardized Precipitation Index). Tujuannya: bandingkan SPI dari 4 sumber data hujan satelit + 1 ensemble, ditampilkan sebagai figure "paper-like" meniru struktur gambar referensi (slide kuliah CCC ITB) — grid subplot baris=musim × kolom=kekuatan El Niño, dengan sumbu/urutan yang identik di semua canvas supaya bisa dibandingkan langsung side-by-side.
+
+Diskusi sebelumnya sudah memutuskan:
+- **Distribusi SPI**: Gamma, parameter di-fit per piksel per bulan kalender, tapi keluarga distribusi (Gamma) **seragam** di seluruh domain Jawa — supaya SPI tetap comparable antar lokasi (ini prinsip inti SPI, bukan sekadar preferensi).
+- **4 sumber data** (semua tanpa login, sudah dicek bisa diakses): CHIRPS v2.0, PERSIANN-CDR, CMORPH (bias-corrected), GPCP Monthly. Plus 1 **ensemble** (rata-rata ke-4 sumber).
+- **3 timescale SPI**: SPI-1, SPI-3, SPI-6. Plus 1 variabel tambahan: **Precipitation Anomaly** (mm, bukan SPI) — total 4 "jenis" yang diplot.
+- **Struktur grid**: baris = JJA, SON, DJF, MAM; kolom = Lemah, Sedang, Kuat (klasifikasi El Niño by ONI/Nino 3.4).
+- **Event yang dipakai** (dari tabel ONI resmi NOAA CPC, bukan tebakan — sudah divalidasi dengan aturan WMO: Weak 0.5–0.9, Moderate 1.0–1.4, Strong ≥1.5, dan dipastikan bukan bagian dari episode yang lebih besar):
+
+  | Kategori | Event | Puncak ONI | Musim yang dipakai |
+  |---|---|---|---|
+  | Lemah | 2019/2020 | 0.8 (NDJ 2019) | JJA2019, SON2019, DJF2019/20, MAM2020 |
+  | Sedang | 2018/2019 | 1.1 (NDJ 2018) | JJA2018, SON2018, DJF2018/19, MAM2019 |
+  | Kuat | 2023/2024 | 2.0 (NDJ 2023) | JJA2023, SON2023, DJF2023/24, MAM2024 |
+
+  Catatan: untuk event Lemah, JJA2019 (ONI≈0.4) sebenarnya masih netral/pra-onset — ini bukan bug, memang begitu kronologi ONI-nya. Baris JJA tetap ditampilkan apa adanya (menunjukkan kondisi riil bulan itu), bukan dipaksa jadi representasi "El Niño penuh".
+
+- Total output: **5 sumber (4+ensemble) × 4 jenis variabel = 20 canvas**, tiap canvas grid 4×3 = 12 peta → **240 peta total**, plus **5 panel probability plot** (1 per sumber, ilustrasi metodologi fitting Gamma, meniru panel kiri-bawah di gambar referensi).
+
+## Temuan riset akses data (sudah divalidasi via curl, bukan asumsi)
+
+| Sumber | Format & granularitas riil | Rentang | Catatan volume |
+|---|---|---|---|
+| CHIRPS v2.0 | 1 file netCDF **global bulanan gabungan** (`chirps-v2.0.monthly.nc`) | 1981–sekarang | ~7.7 GB, 1x download, clip lokal ke Jawa |
+| GPCP Monthly | 1 file netCDF **global bulanan gabungan** | 1979–sekarang | ~20 MB, 1x download |
+| PERSIANN-CDR | netCDF **harian**, 1 file/hari, host resmi NCEI (bukan raw binary CHRS yang undocumented) | 1983–sekarang | ~1.27 MB/file. Rentang penuh = ~15.900 file (~20 GB) |
+| CMORPH (bias-corrected) | netCDF **harian** 0.25°, 1 file/hari, NCEI | 1998–sekarang | ~0.37 MB/file. Rentang penuh = ~10.450 file (~3.9 GB) |
+
+**Keputusan baseline klimatologi (rekomendasi, mohon dikonfirmasi)**: PERSIANN-CDR dipangkas mulai **1998** (bukan 1983) supaya sejajar dengan CMORPH — tetap jauh di atas minimum WMO 20–30 tahun (26 tahun), tapi memangkas ~6.000 request/~8GB yang tidak menambah nilai (karena CMORPH tetap jadi faktor pembatas untuk ensemble). CHIRPS & GPCP tetap pakai rentang penuhnya (murah, 1 file). Estimasi total: **~20.300 file harian, ~24 GB, kemungkinan 30–90 menit** jalan sebagai background job (paralel terbatas, sopan ke server NCEI).
+
+## Struktur proyek baru
+
+Dipisah dari `downloader-hidrologi/` (itu murni tool download generik) karena ini sudah masuk **pipeline analisis ilmiah** (fetch → proses statistik → publication figure). Direktori baru:
+
+```
+/home/wrf-drive/spi-kekeringan-jawa/
+├── config.py                  # single source of truth: bbox Jawa, event ONI, baseline, colormap/scale
+├── download_chirps.py         # download global monthly nc sekali, clip ke Jawa
+├── download_gpcp.py           # download global monthly nc sekali, clip ke Jawa
+├── download_persiann_cdr.py   # loop harian NCEI, clip on-the-fly, agregasi ke bulanan, buang raw
+├── download_cmorph.py         # loop harian NCEI, clip on-the-fly, agregasi ke bulanan, buang raw
+├── regrid_common.py           # regrid ke-4 sumber ke grid seragam (target: grid CHIRPS 0.05°)
+├── compute_spi.py             # fit Gamma per piksel/bulan, hitung anomaly + SPI-1/3/6, + ensemble
+├── plot_paper_figures.py      # generate 20 canvas (4x3 grid) + 5 probability plot
+├── data/
+│   ├── raw/                   # hasil clip per-sumber sebelum regrid (nc kecil, per sumber)
+│   └── processed/              # {source}_indices_java.nc (precip, anomaly, spi1, spi3, spi6)
+├── figures/
+│   ├── anomaly_{source}.png
+│   ├── spi1_{source}.png / spi3_ / spi6_
+│   └── probability_{source}.png
+└── requirements.txt            # + xarray, netCDF4, scipy, cartopy, matplotlib
+```
+
+## Tahapan implementasi (bertahap, divalidasi tiap langkah — bukan langsung build semua)
+
+1. **`config.py`** — definisikan sekali: bbox Jawa, tabel event ONI di atas, baseline period per sumber, target grid regrid, konvensi skala warna (anomaly: diverging ±150 mm/bulan; SPI: diverging -2..2 dengan `BoundaryNorm` sesuai kelas WMO), grid cell representatif untuk probability plot (usul: Bandung -6.9,107.6 — bisa diganti).
+
+2. **Bangun & validasi pipeline pakai CHIRPS dulu** (paling murah/cepat, sudah pernah kita pakai):
+   - `download_chirps.py`: clip Jawa dari file bulanan gabungan.
+   - `compute_spi.py`: fit Gamma per piksel per bulan kalender (pakai `scipy.stats.gamma`, tangani proporsi nol via mixed distribution), transform ke z-score (`scipy.stats.norm.ppf`), hasilkan anomaly + SPI-1/3/6.
+   - Sanity check: nilai SPI di piksel Jawa Barat untuk NDJ 2023 (Kuat) harus negatif jelas (kekeringan), sesuai literatur dampak El Niño kuat ke Indonesia.
+
+3. **Tambah GPCP** (sama mudahnya, 1 file) — validasi hasil SPI-nya masuk akal juga meski resolusi kasar (~10 grid cell across Jawa).
+
+4. **Bangun `download_persiann_cdr.py` & `download_cmorph.py`** — uji dulu di window pendek (2 tahun terakhir) untuk pastikan parsing netCDF & clip benar, baru jalankan penuh ke baseline yang disepakati (background task, resume-safe seperti pola `download_dem.py` yang sudah ada — skip file yang sudah ada, retry aman).
+
+5. **`regrid_common.py`** — regrid PERSIANN/CMORPH/GPCP ke grid CHIRPS (0.05°) pakai `xarray.interp` (bilinear), simpan hasil regrid per sumber. Hitung ensemble = rata-rata SPI/anomaly antar sumber (rata-rata di level indeks turunan, bukan di level curah hujan mentah — supaya klimatologi masing-masing sumber tetap dihormati).
+
+6. **`plot_paper_figures.py`** — prototype dulu 1 canvas (SPI-3 CHIRPS) untuk memastikan layout (baris/kolom, label "Lemah (2019/2020)" dst, colorbar, garis pantai Jawa via cartopy) persis sama gaya gambar referensi. Setelah user setujui tampilannya, generate semua 20 canvas + 5 probability plot dengan kode yang sama (loop sumber × variabel).
+
+## Verifikasi end-to-end
+
+- Tiap file `data/processed/*.nc` dicek dengan `gdalinfo`/`ncdump -h` untuk memastikan dimensi & cakupan bbox benar (pola sama seperti yang sudah dipakai untuk DEM/Hujan/Debit sebelumnya).
+- 1 canvas prototype (SPI-3 CHIRPS) direview visual oleh user sebelum generate 19 canvas sisanya — checkpoint ini mencegah kerja ulang besar-besaran kalau layout perlu revisi.
+- Nilai SPI di beberapa piksel dicross-check manual (spot-check dengan `scipy` di luar pipeline) untuk 1-2 titik supaya fitting Gamma-nya tidak silently salah.
+
+## Hal yang perlu dikonfirmasi user sebelum eksekusi
+
+1. Nama/lokasi direktori proyek baru: `/home/wrf-drive/spi-kekeringan-jawa/` — OK atau mau nama lain?
+2. Baseline PERSIANN-CDR dipangkas ke 1998–sekarang (bukan 1983) demi memangkas waktu download — setuju?
+3. Titik grid representatif untuk probability plot: Bandung (-6.9, 107.6) — OK atau titik lain?
+4. Target grid regrid: resolusi CHIRPS (0.05°, paling halus) — setuju semua sumber di-upsample ke situ?
